@@ -12,7 +12,8 @@ from modelscope_agent.constants import (BASE64_FILES,
                                         DEFAULT_TOOL_MANAGER_SERVICE_URL,
                                         LOCAL_FILE_PATHS,
                                         MODELSCOPE_AGENT_TOKEN_HEADER_NAME)
-from modelscope_agent.tools.utils.openapi_utils import (execute_api_call,
+from modelscope_agent.tools.utils.openapi_utils import (dot_to_dict,
+                                                        execute_api_call,
                                                         get_parameter_value,
                                                         openapi_schema_convert)
 from modelscope_agent.utils.base64_utils import decode_base64_to_files
@@ -449,6 +450,7 @@ class ToolServiceProxy(BaseTool):
 
     def call(self, params: str, **kwargs):
         # ms_token
+        kwargs['is_remote'] = True
         self.user_token = kwargs.get('user_token', self.user_token)
         service_token = os.getenv('TOOL_MANAGER_AUTH', '')
         headers = {
@@ -457,7 +459,7 @@ class ToolServiceProxy(BaseTool):
             'authorization': service_token
         }
         logger.query_info(message=f'calling tool header {headers}')
-
+        kwargs['is_remote'] = True
         try:
             # visit tool node to call tool
             response = requests.post(
@@ -480,7 +482,7 @@ class ToolServiceProxy(BaseTool):
             )
 
 
-class OpenapiServiceProxy:
+class OpenapiServiceProxy(BaseTool):
 
     def __init__(self,
                  openapi: Union[str, Dict],
@@ -594,10 +596,36 @@ class OpenapiServiceProxy:
         for param in api_info['parameters']:
             if 'required' in param and param['required']:
                 if param['name'] not in params_json:
-                    raise ValueError(f'param `{param["name"]}` is required')
+                    current = {}
+                    current_test = deepcopy(params_json)
+                    parts = param['name'].split('.')
+                    for i, part in enumerate(parts):
+                        if part not in current:
+                            current[part] = {}
+                        current = current[part]
+                        if part not in current_test:
+                            raise ValueError(
+                                f'param `{".".join(parts[:i])}` is required')
+                        current_test = current_test[part]
         return params_json
 
     def _parse_credentials(self, credentials: dict, headers=None):
+        """
+
+        Args:
+            credentials: includes auth_type, api_key_header, api_key_value, api_key_header_prefix
+                usage:
+                {
+                    "auth_type": "api_key",
+                    "api_key_header": "Authorization",
+                    "api_key_value": "xxx",
+                    "api_key_header_prefix": "Bearer"
+                }
+            headers:
+
+        Returns:
+
+        """
         if not headers:
             headers = {}
 
@@ -673,33 +701,39 @@ class OpenapiServiceProxy:
             elif parameter['in'] == 'header':
                 header[parameter['name']] = value
             else:
-                data[parameter['name']] = value
+                if '.' in parameter['name']:
+                    result = dot_to_dict(parameter['name'], value)
+                    data.update(result)
+                else:
+                    data[parameter['name'].split('.')[0]] = value
 
         for name, value in path_params.items():
             url = url.replace(f'{{{name}}}', f'{value}')
+        credentials = kwargs.get('credentials', {})
+        header = self._parse_credentials(credentials, header)
+
         try:
             # visit tool node to call tool
-            # if self.is_remote:
-            #     response = requests.post(
-            #         f'{self.openapi_service_manager_url}/execute_openapi',
-            #         json={
-            #             'url': url,
-            #             'params': query_params,
-            #             'headers': header,
-            #             'method': method,
-            #             'cookies': cookies,
-            #             'data': data
-            #         },
-            #         headers=headers)
-            #     logger.query_info(
-            #         message=f'calling tool message {response.json()}')
-            #
-            #     response.raise_for_status()
-            # else:
-            credentials = kwargs.get('credentials', {})
-            header = self._parse_credentials(credentials, header)
-            response = execute_api_call(url, method, header, query_params,
-                                        data, cookies)
+            if self.is_remote and not kwargs.get('is_test', False):
+                response = requests.post(
+                    f'{self.openapi_service_manager_url}/execute_openapi',
+                    json={
+                        'openapi_name': self.openapi_remote_name,
+                        'url': url,
+                        'params': query_params,
+                        'headers': header,
+                        'method': method,
+                        'cookies': cookies,
+                        'data': data
+                    },
+                    headers=headers)
+                logger.query_info(
+                    message=f'calling tool message {response.json()}')
+
+                response.raise_for_status()
+            else:
+                response = execute_api_call(url, method, header, query_params,
+                                            data, cookies)
             return OpenapiServiceProxy.parse_service_response(response)
         except Exception as e:
             raise RuntimeError(

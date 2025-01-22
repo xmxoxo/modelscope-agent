@@ -1,11 +1,45 @@
+import copy
 import os
 
 import jsonref
 import requests
 
 
+def dot_to_dict(key, value):
+    keys = key.split('.')
+    result = {}
+    current = result
+    for k in keys[:-1]:
+        current[k] = {}
+        current = current[k]
+    current[keys[
+        -1]] = value  # Using eval to convert the value to the appropriate type
+    return result
+
+
+def structure_json(flat_json):
+    structured = {}
+
+    for key, value in flat_json.items():
+        parts = key.split('.')
+        current = structured
+
+        for i, part in enumerate(parts):
+            if i == len(parts) - 1:
+                current[part] = value
+            else:
+                if part not in current:
+                    current[part] = {}
+                current = current[part]
+
+    return structured
+
+
 def execute_api_call(url: str, method: str, headers: dict, params: dict,
                      data: dict, cookies: dict):
+
+    if data:
+        data = structure_json(data)
     try:
         print('url:', url)
         print('headers:', headers)
@@ -87,15 +121,15 @@ def parse_nested_parameters(param_name, param_info, parameters_list, content):
 
 
 # openapi_schema_convert,register to tool_config.json
-def extract_references(schema_content):
+def extract_references(schema_content, index=0):
     references = []
     if isinstance(schema_content, dict):
         if '$ref' in schema_content:
             references.append(schema_content['$ref'])
         for key, value in schema_content.items():
-            references.extend(extract_references(value))
+            references.extend(extract_references(value, index + 1))
         # if properties exist, record the schema content in references and deal later
-        if 'properties' in schema_content:
+        if 'properties' in schema_content and index == 0:
             references.append(schema_content)
     elif isinstance(schema_content, list):
         for item in schema_content:
@@ -311,9 +345,22 @@ def openapi_schema_convert(schema: dict, auth: dict = {}):
     return config_data
 
 
-def get_parameter_value(parameter: dict, parameters: dict):
-    if parameter['name'] in parameters:
-        return parameters[parameter['name']]
+def get_parameter_value(parameter: dict, generated_params: dict):
+    if parameter['name'] in generated_params:
+        return generated_params[parameter['name']]
+    elif '.' in parameter['name']:
+        current = {}
+        current_test = copy.deepcopy(generated_params)
+        parts = parameter['name'].split('.')
+        for i, part in enumerate(parts):
+            if part not in current:
+                current[part] = {}
+            current = current[part]
+            if part not in current_test:
+                raise ValueError(f'param `{".".join(parts[:i])}` is required')
+            current_test = current_test[part]
+
+        return generated_params[parts[0]]
     elif parameter.get('required', False):
         raise ValueError(f"Missing required parameter {parameter['name']}")
     else:
